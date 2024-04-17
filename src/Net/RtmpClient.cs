@@ -1,4 +1,12 @@
-﻿using System;
+﻿using Hina;
+using Hina.Collections;
+using Hina.Net;
+using Hina.Threading;
+using Konseki;
+using RtmpSharp.Messaging;
+using RtmpSharp.Messaging.Messages;
+using RtmpSharp.Net.Messages;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -7,78 +15,69 @@ using System.Net.Security;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Hina;
-using Hina.Collections;
-using Hina.Net;
-using Hina.Threading;
-using Konseki;
-using RtmpSharp.Messaging;
-using RtmpSharp.Messaging.Messages;
-using RtmpSharp.Net.Messages;
 
 namespace RtmpSharp.Net
 {
     public partial class RtmpClient
     {
-        const int DefaultPort = 1935;
+        private const int DefaultPort = 1935;
 
 
-        public event EventHandler<MessageReceivedEventArgs>    MessageReceived;
+        public event EventHandler<MessageReceivedEventArgs> MessageReceived;
         public event EventHandler<ClientDisconnectedException> Disconnected;
-        public event EventHandler<Exception>                   CallbackException;
+        public event EventHandler<Exception> CallbackException;
 
         // the cancellation source (and token) that this client internally uses to signal disconnection
-        readonly CancellationToken token;
-        readonly CancellationTokenSource source;
+        private readonly CancellationToken token;
+        private readonly CancellationTokenSource source;
 
         // the serialization context for this rtmp client
-        readonly SerializationContext context;
+        private readonly SerializationContext context;
 
         // the callback manager that handles completing invocation requests
-        readonly TaskCallbackManager<uint, object> callbacks;
+        private readonly TaskCallbackManager<uint, object> callbacks;
 
         // fn(message: RtmpMessage, chunk_stream_id: int) -> None
         //     queues a message to be written. this is assigned post-construction by `connectasync`.
-        Action<RtmpMessage, int> queue;
+        private Action<RtmpMessage, int> queue;
 
         // the client id that was assigned to us by the remote peer. this is assigned post-construction by
         // `connectasync`, and may be null if no explicit client id was provided.
-        string clientId;
+        private string clientId;
 
         // counter for monotonically increasing invoke ids
-        int invokeId;
+        private int invokeId;
 
         // true if this connection is no longer connected
-        bool disconnected;
+        private bool disconnected;
 
         // a tuple describing the cause of the disconnection. either value may be null.
-        (string message, Exception inner) cause;
+        private (string message, Exception inner) cause;
 
-
-        RtmpClient(SerializationContext context)
+        private RtmpClient(SerializationContext context)
         {
-            this.context   = context;
-            this.callbacks = new TaskCallbackManager<uint, object>();
-            this.source    = new CancellationTokenSource();
-            this.token     = source.Token;
+            this.context = context;
+            callbacks = new TaskCallbackManager<uint, object>();
+            source = new CancellationTokenSource();
+            token = source.Token;
         }
 
 
         #region internal callbacks
 
         // `internalreceivesubscriptionvalue` will never throw an exception
-        void InternalReceiveSubscriptionValue(string clientId, string subtopic, object body)
+        private void InternalReceiveSubscriptionValue(string clientId, string subtopic, object body)
         {
             WrapCallback(() => MessageReceived?.Invoke(this, new MessageReceivedEventArgs(clientId, subtopic, body)));
         }
 
         // called internally by the readers and writers when an error that would invalidate this connection occurs.
         // `inner` may be null.
-        void InternalCloseConnection(string reason, Exception inner)
+        private void InternalCloseConnection(string reason, Exception inner)
         {
             Volatile.Write(ref cause.message, reason);
-            Volatile.Write(ref cause.inner,   inner);
-            Volatile.Write(ref disconnected,  true);
+            Volatile.Write(ref cause.inner, inner);
+            Volatile.Write(ref disconnected, true);
 
             source.Cancel();
             callbacks.SetExceptionForAll(DisconnectedException());
@@ -88,7 +87,7 @@ namespace RtmpSharp.Net
 
         // this method will never throw an exception unless that exception will be fatal to this connection, and thus
         // the connection would be forced to close.
-        void InternalReceiveEvent(RtmpMessage message)
+        private void InternalReceiveEvent(RtmpMessage message)
         {
             switch (message)
             {
@@ -97,20 +96,21 @@ namespace RtmpSharp.Net
                     break;
 
                 case Invoke i:
-                    var param = i.Arguments?.FirstOrDefault();
+                    object param = i.Arguments?.FirstOrDefault();
 
                     switch (i.MethodName)
                     {
                         case "_result":
                             // unwrap the flex wrapper object if it is present
-                            var a = param as AcknowledgeMessage;
+                            AcknowledgeMessage a = param as AcknowledgeMessage;
 
                             callbacks.SetResult(i.InvokeId, a?.Body ?? param);
                             break;
 
                         case "_error":
                             // try to unwrap common rtmp and flex error types, if we recognize any.
-                            switch (param) {
+                            switch (param)
+                            {
                                 case string v:
                                     callbacks.SetException(i.InvokeId, new Exception(v));
                                     break;
@@ -122,11 +122,11 @@ namespace RtmpSharp.Net
                                 case AsObject o:
                                     object x;
 
-                                    var code        = o.TryGetValue("code",        out x) && x is string q ? q : null;
-                                    var description = o.TryGetValue("description", out x) && x is string r ? r : null;
-                                    var cause       = o.TryGetValue("cause",       out x) && x is string s ? s : null;
+                                    string code = o.TryGetValue("code", out x) && x is string q ? q : null;
+                                    string description = o.TryGetValue("description", out x) && x is string r ? r : null;
+                                    string cause = o.TryGetValue("cause", out x) && x is string s ? s : null;
 
-                                    var extended    = o.TryGetValue("ex", out x) || o.TryGetValue("extended", out x) ? x : null;
+                                    object extended = o.TryGetValue("ex", out x) || o.TryGetValue("extended", out x) ? x : null;
 
                                     callbacks.SetException(i.InvokeId, new InvocationException(o, code, description, cause, null, extended));
                                     break;
@@ -141,9 +141,9 @@ namespace RtmpSharp.Net
                         case "receive":
                             if (param is AsyncMessage c)
                             {
-                                var id    = c.ClientId;
-                                var value = c.Headers.TryGetValue(AsyncMessageHeaders.Subtopic, out var x) ? x as string : null;
-                                var body  = c.Body;
+                                string id = c.ClientId;
+                                string value = c.Headers.TryGetValue(AsyncMessageHeaders.Subtopic, out object x) ? x as string : null;
+                                object body = c.Body;
 
                                 InternalReceiveSubscriptionValue(id, value, body);
                             }
@@ -178,21 +178,24 @@ namespace RtmpSharp.Net
 
         #region internal helper methods
 
-        uint NextInvokeId() => (uint)Interlocked.Increment(ref invokeId);
-        ClientDisconnectedException DisconnectedException() => new ClientDisconnectedException(cause.message, cause.inner);
+        private uint NextInvokeId() => (uint)Interlocked.Increment(ref invokeId);
+        private ClientDisconnectedException DisconnectedException() => new ClientDisconnectedException(cause.message, cause.inner);
 
         // calls a remote endpoint, sent along the specified chunk stream id, on message stream id #0
-        Task<object> InternalCallAsync(Invoke request, int chunkStreamId)
+        private Task<object> InternalCallAsync(Invoke request, int chunkStreamId)
         {
-            if (disconnected) throw DisconnectedException();
+            if (disconnected)
+            {
+                throw DisconnectedException();
+            }
 
-            var task = callbacks.Create(request.InvokeId);
+            Task<object> task = callbacks.Create(request.InvokeId);
 
             queue(request, chunkStreamId);
             return task;
         }
 
-        void WrapCallback(Action action)
+        private void WrapCallback(Action action)
         {
             try
             {
@@ -216,8 +219,8 @@ namespace RtmpSharp.Net
 
         public class Options
         {
-            public string               Url;
-            public int                  ChunkLength = 4192;
+            public string Url;
+            public int ChunkLength = 4192;
             public SerializationContext Context;
 
             // the below fields are optional, and may be null
@@ -231,45 +234,63 @@ namespace RtmpSharp.Net
             public RemoteCertificateValidationCallback Validate;
         }
 
+        public static async Task<System.Net.Sockets.TcpClient> HandShakeAsync(Options options)
+        {
+            Check.NotNull(options.Url, options.Context);
+
+
+            string url = options.Url;
+            int chunkLength = options.ChunkLength;
+            SerializationContext context = options.Context;
+            RemoteCertificateValidationCallback validate = options.Validate ?? ((sender, certificate, chain, errors) => true);
+
+            Uri uri = new Uri(url);
+            System.Net.Sockets.TcpClient tcp = await TcpClientEx.ConnectAsync(uri.Host, uri.Port != -1 ? uri.Port : DefaultPort);
+            Stream stream = await GetStreamAsync(uri, tcp.GetStream(), validate);
+
+            await Handshake.GoAsync(stream);
+
+            return tcp;
+        }
         public static async Task<RtmpClient> ConnectAsync(Options options)
         {
             Check.NotNull(options.Url, options.Context);
 
 
-            var url         = options.Url;
-            var chunkLength = options.ChunkLength;
-            var context     = options.Context;
-            var validate    = options.Validate ?? ((sender, certificate, chain, errors) => true);
+            string url = options.Url;
+            int chunkLength = options.ChunkLength;
+            SerializationContext context = options.Context;
+            RemoteCertificateValidationCallback validate = options.Validate ?? ((sender, certificate, chain, errors) => true);
 
-            var uri         = new Uri(url);
-            var tcp         = await TcpClientEx.ConnectAsync(uri.Host, uri.Port != -1 ? uri.Port : DefaultPort);
-            var stream      = await GetStreamAsync(uri, tcp.GetStream(), validate);
+            Uri uri = new Uri(url);
+            System.Net.Sockets.TcpClient tcp = await TcpClientEx.ConnectAsync(uri.Host, uri.Port != -1 ? uri.Port : DefaultPort);
+            Stream stream = await GetStreamAsync(uri, tcp.GetStream(), validate);
 
             await Handshake.GoAsync(stream);
 
 
-            var client      = new RtmpClient(context);
-            var reader      = new Reader(client, stream, context, client.token);
-            var writer      = new Writer(client, stream, context, client.token);
+            RtmpClient client = new RtmpClient(context);
+            Reader reader = new Reader(client, stream, context, client.token);
+            Writer writer = new Writer(client, stream, context, client.token);
 
             reader.RunAsync().Forget();
             writer.RunAsync(chunkLength).Forget();
 
-            client.queue    = (message, chunkStreamId) => writer.QueueWrite(message, chunkStreamId);
+            client.queue = (message, chunkStreamId) => writer.QueueWrite(message, chunkStreamId);
             client.clientId = await RtmpConnectAsync(
-                client:       client,
-                appName:      options.AppName,
-                pageUrl:      options.PageUrl,
-                swfUrl:       options.SwfUrl,
-                tcUrl:        uri.ToString(),
+                client: client,
+                appName: options.AppName,
+                pageUrl: options.PageUrl,
+                swfUrl: options.SwfUrl,
+                tcUrl: uri.ToString(),
                 flashVersion: options.FlashVersion,
-                arguments:    options.Arguments);
+                arguments: options.Arguments);
 
 
             return client;
         }
 
-        static async Task<Stream> GetStreamAsync(Uri uri, Stream stream, RemoteCertificateValidationCallback validate)
+        private static async Task<Stream> GetStreamAsync(Uri uri, Stream stream, RemoteCertificateValidationCallback validate)
         {
             CheckDebug.NotNull(uri, stream, validate);
 
@@ -281,7 +302,7 @@ namespace RtmpSharp.Net
                 case "rtmps":
                     Check.NotNull(validate);
 
-                    var ssl = new SslStream(stream, false, validate);
+                    SslStream ssl = new SslStream(stream, false, validate);
                     await ssl.AuthenticateAsClientAsync(uri.Host);
 
                     return ssl;
@@ -292,14 +313,14 @@ namespace RtmpSharp.Net
         }
 
         // attempts to perform an rtmp connect, and returns the client id assigned to us (if any - this may be null)
-        static async Task<string> RtmpConnectAsync(RtmpClient client, string appName, string pageUrl, string swfUrl, string tcUrl, string flashVersion, object[] arguments)
+        private static async Task<string> RtmpConnectAsync(RtmpClient client, string appName, string pageUrl, string swfUrl, string tcUrl, string flashVersion, object[] arguments)
         {
-            var request = new InvokeAmf0
+            InvokeAmf0 request = new InvokeAmf0
             {
-                InvokeId   = client.NextInvokeId(),
+                InvokeId = client.NextInvokeId(),
                 MethodName = "connect",
-                Arguments  = arguments ?? EmptyArray<object>.Instance,
-                Headers    = new AsObject()
+                Arguments = arguments ?? EmptyArray<object>.Instance,
+                Headers = new AsObject()
                 {
                     { "app",            appName          },
                     { "audioCodecs",    3575             },
@@ -315,9 +336,9 @@ namespace RtmpSharp.Net
                 },
             };
 
-            var response = await client.InternalCallAsync(request, chunkStreamId: 3) as IDictionary<string, object>;
+            IDictionary<string, object> response = await client.InternalCallAsync(request, chunkStreamId: 3) as IDictionary<string, object>;
 
-            return response != null && (response.TryGetValue("clientId", out var clientId) || response.TryGetValue("id", out clientId))
+            return response != null && (response.TryGetValue("clientId", out object clientId) || response.TryGetValue("id", out clientId))
                 ? clientId as string
                 : null;
         }
@@ -328,7 +349,7 @@ namespace RtmpSharp.Net
         #region rtmpclient methods
 
         // some servers will fail if `destination` is null (but not if it's an empty string)
-        const string NoDestination = "";
+        private const string NoDestination = "";
 
         public async Task<T> InvokeAsync<T>(string method, params object[] arguments)
             => NanoTypeConverter.ConvertTo<T>(
@@ -340,11 +361,11 @@ namespace RtmpSharp.Net
             // decoding and don't have a way to specify amf0 encoding in this iteration of rtmpclient, so no check is
             // needed.
 
-             var request = new InvokeAmf3()
+            InvokeAmf3 request = new InvokeAmf3()
             {
-                InvokeId   = NextInvokeId(),
+                InvokeId = NextInvokeId(),
                 MethodName = null,
-                Arguments  = new[]
+                Arguments = new[]
                 {
                     new RemotingMessage
                     {
@@ -369,13 +390,13 @@ namespace RtmpSharp.Net
         {
             Check.NotNull(endpoint, destination, subtopic, clientId);
 
-            var message = new CommandMessage
+            CommandMessage message = new CommandMessage
             {
-                ClientId      = clientId,
+                ClientId = clientId,
                 CorrelationId = null,
-                Operation     = CommandMessage.Operations.Subscribe,
-                Destination   = destination,
-                Headers       = new StaticDictionary<string, object>()
+                Operation = CommandMessage.Operations.Subscribe,
+                Destination = destination,
+                Headers = new StaticDictionary<string, object>()
                 {
                     { FlexMessageHeaders.Endpoint,     endpoint },
                     { FlexMessageHeaders.FlexClientId, clientId },
@@ -390,13 +411,13 @@ namespace RtmpSharp.Net
         {
             Check.NotNull(endpoint, destination, subtopic, clientId);
 
-            var message = new CommandMessage
+            CommandMessage message = new CommandMessage
             {
-                ClientId      = clientId,
+                ClientId = clientId,
                 CorrelationId = null,
-                Operation     = CommandMessage.Operations.Unsubscribe,
-                Destination   = destination,
-                Headers       = new KeyDictionary<string, object>()
+                Operation = CommandMessage.Operations.Unsubscribe,
+                Destination = destination,
+                Headers = new KeyDictionary<string, object>()
                 {
                     { FlexMessageHeaders.Endpoint,     endpoint },
                     { FlexMessageHeaders.FlexClientId, clientId },
@@ -411,13 +432,13 @@ namespace RtmpSharp.Net
         {
             Check.NotNull(username, password);
 
-            var credentials = $"{username}:{password}";
-            var message     = new CommandMessage
+            string credentials = $"{username}:{password}";
+            CommandMessage message = new CommandMessage
             {
-                ClientId    = clientId,
+                ClientId = clientId,
                 Destination = NoDestination,
-                Operation   = CommandMessage.Operations.Login,
-                Body        = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials)),
+                Operation = CommandMessage.Operations.Login,
+                Body = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials)),
             };
 
             return await InvokeAsync<string>(null, message) == "success";
@@ -425,11 +446,11 @@ namespace RtmpSharp.Net
 
         public Task LogoutAsync()
         {
-            var message = new CommandMessage
+            CommandMessage message = new CommandMessage
             {
-                ClientId    = clientId,
+                ClientId = clientId,
                 Destination = NoDestination,
-                Operation   = CommandMessage.Operations.Logout
+                Operation = CommandMessage.Operations.Logout
             };
 
             return InvokeAsync<object>(null, message);
@@ -437,11 +458,11 @@ namespace RtmpSharp.Net
 
         public Task PingAsync()
         {
-            var message = new CommandMessage
+            CommandMessage message = new CommandMessage
             {
-                ClientId    = clientId,
+                ClientId = clientId,
                 Destination = NoDestination,
-                Operation   = CommandMessage.Operations.ClientPing
+                Operation = CommandMessage.Operations.ClientPing
             };
 
             return InvokeAsync<object>(null, message);

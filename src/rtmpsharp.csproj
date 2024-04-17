@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk" ToolsVersion="15.0">
   <PropertyGroup>
     <Title>rtmpsharp</Title>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <Description>a fast and lightweight rtmp(s) client library.</Description>
     <PackageTags>rtmp rtmps amf flex netcore</PackageTags>
     <PackageProjectUrl>https://github.com/hinaria/rtmpsharp</PackageProjectUrl>
